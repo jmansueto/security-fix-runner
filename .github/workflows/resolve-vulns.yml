@@ -1,0 +1,444 @@
+name: Resolve CodeQL Vulnerabilities (Runner)
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_repo:
+        description: 'Single target repository in owner/repo format (e.g., jmansueto/user-management-vulns). Use this OR target_repos.'
+        required: false
+        type: string
+      target_repos:
+        description: 'Multi-line list of target repositories (one per line). For enterprise-scale processing of multiple repos. Use this OR target_repo.'
+        required: false
+        type: string
+      target_branch:
+        description: 'Branch to target for PRs (optional, defaults to repo default branch). Applied to all repos.'
+        required: false
+        type: string
+      sarif_path:
+        description: 'Relative path to SARIF file in target repo (optional, e.g., codeql-results/results-123.sarif). Applied to all repos.'
+        required: false
+        type: string
+      batch_size:
+        description: 'Number of vulnerabilities per batch'
+        required: false
+        default: '4'
+        type: string
+      dry_run:
+        description: 'Dry run mode (output batches without calling Devin API)'
+        required: false
+        default: true
+        type: boolean
+      max_batches:
+        description: 'Maximum number of batches to process per repo (optional, for limiting demo time)'
+        required: false
+        type: string
+      max_parallel:
+        description: 'Maximum number of repositories to process in parallel (controls concurrency)'
+        required: false
+        default: '3'
+        type: string
+      session_timeout:
+        description: 'Maximum seconds to wait for each Devin session (default: 1800 = 30 minutes)'
+        required: false
+        default: '1800'
+        type: string
+      poll_interval:
+        description: 'Seconds between status polls when waiting for Devin sessions'
+        required: false
+        default: '30'
+        type: string
+      codeql_languages:
+        description: 'Languages for CodeQL analysis (comma-separated if multiple)'
+        required: false
+        default: 'python'
+        type: string
+      codeql_queries:
+        description: 'CodeQL query pack to use'
+        required: false
+        default: 'security-extended'
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: Prepare Repository List
+    runs-on: ubuntu-latest
+    outputs:
+      repos_json: ${{ steps.parse_repos.outputs.repos_json }}
+    
+    steps:
+      - name: Parse repository inputs
+        id: parse_repos
+        run: |
+          REPOS=""
+          if [ -n "${{ inputs.target_repos }}" ]; then
+            REPOS="${{ inputs.target_repos }}"
+          elif [ -n "${{ inputs.target_repo }}" ]; then
+            REPOS="${{ inputs.target_repo }}"
+          else
+            echo "Error: Either target_repo or target_repos must be provided"
+            exit 1
+          fi
+          
+          # Parse into JSON array, filtering out empty lines and comments
+          REPO_ARRAY=$(echo "$REPOS" | grep -v '^#' | grep -v '^[[:space:]]*$' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          
+          echo "Repositories to process:"
+          echo "$REPO_ARRAY" | jq -r '.[]'
+          
+          echo "repos_json={\"repo\":$REPO_ARRAY}" >> $GITHUB_OUTPUT
+
+  resolve:
+    name: Resolve Vulnerabilities
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{ fromJson(needs.prepare.outputs.repos_json) }}
+      fail-fast: false
+      max-parallel: ${{ fromJson(inputs.max_parallel) }}
+    
+    steps:
+      - name: Checkout security-fix-runner
+        uses: actions/checkout@v4
+      
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install resolver dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r vulnerability-resolver/requirements.txt
+      
+      - name: Compute safe repo name
+        id: repo_safe
+        run: |
+          REPO_SAFE=$(echo "${{ matrix.repo }}" | tr '/' '-')
+          echo "name=$REPO_SAFE" >> $GITHUB_OUTPUT
+          echo "REPO_SAFE=$REPO_SAFE" >> $GITHUB_ENV
+          echo "Processing repository: ${{ matrix.repo }} (safe name: $REPO_SAFE)"
+      
+      - name: Checkout target repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.repo }}
+          ref: ${{ inputs.target_branch }}
+          path: target
+          token: ${{ secrets.CROSS_REPO_GH_TOKEN }}
+      
+      - name: Find existing SARIF
+        id: find_sarif
+        run: |
+          SARIF=""
+          
+          # Check if explicit path provided
+          if [ -n "${{ inputs.sarif_path }}" ]; then
+            if [ -f "target/${{ inputs.sarif_path }}" ]; then
+              SARIF="target/${{ inputs.sarif_path }}"
+              echo "Found SARIF at explicit path: $SARIF"
+            fi
+          fi
+          
+          # Search in codeql-results/
+          if [ -z "$SARIF" ] && [ -d "target/codeql-results" ]; then
+            SARIF=$(find target/codeql-results -name "*.sarif" -type f -printf '%T@ %p\n' | sort -rn | head -1 | cut -d' ' -f2-)
+            if [ -n "$SARIF" ]; then
+              echo "Found SARIF in codeql-results: $SARIF"
+            fi
+          fi
+          
+          # Search in sarif-results/
+          if [ -z "$SARIF" ] && [ -d "target/sarif-results" ]; then
+            SARIF=$(find target/sarif-results -name "*.sarif" -type f -printf '%T@ %p\n' | sort -rn | head -1 | cut -d' ' -f2-)
+            if [ -n "$SARIF" ]; then
+              echo "Found SARIF in sarif-results: $SARIF"
+            fi
+          fi
+          
+          echo "sarif=$SARIF" >> $GITHUB_OUTPUT
+      
+      - name: Initialize CodeQL (local)
+        if: steps.find_sarif.outputs.sarif == ''
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ inputs.codeql_languages }}
+          queries: ${{ inputs.codeql_queries }}
+          source-root: target
+      
+      - name: Perform CodeQL analysis (local)
+        if: steps.find_sarif.outputs.sarif == ''
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ inputs.codeql_languages }}"
+          output: sarif-results
+          upload: false
+      
+      - name: Pick SARIF after CodeQL
+        id: pick_sarif_after_codeql
+        if: steps.find_sarif.outputs.sarif == ''
+        run: |
+          SARIF=$(find sarif-results -name "*.sarif" -type f -printf '%T@ %p\n' | sort -rn | head -1 | cut -d' ' -f2-)
+          echo "Generated SARIF: $SARIF"
+          echo "sarif=$SARIF" >> $GITHUB_OUTPUT
+      
+      - name: Build orchestrator command
+        id: build_cmd
+        run: |
+          # Determine SARIF path
+          SARIF="${{ steps.find_sarif.outputs.sarif }}"
+          if [ -z "$SARIF" ]; then
+            SARIF="${{ steps.pick_sarif_after_codeql.outputs.sarif }}"
+          fi
+          
+          if [ -z "$SARIF" ]; then
+            echo "Error: No SARIF file found or generated"
+            exit 1
+          fi
+          
+          # Build command
+          CMD="python vulnerability-resolver/orchestrator.py"
+          CMD="$CMD --repo-url https://github.com/${{ matrix.repo }}"
+          CMD="$CMD --sarif $SARIF"
+          
+          if [ -n "${{ inputs.target_branch }}" ]; then
+            CMD="$CMD --branch ${{ inputs.target_branch }}"
+          fi
+          
+          CMD="$CMD --batch-size ${{ inputs.batch_size }}"
+          
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            CMD="$CMD --dry-run"
+          fi
+          
+          if [ -n "${{ inputs.max_batches }}" ]; then
+            CMD="$CMD --max-batches ${{ inputs.max_batches }}"
+          fi
+          
+          CMD="$CMD --session-timeout ${{ inputs.session_timeout }}"
+          CMD="$CMD --poll-interval ${{ inputs.poll_interval }}"
+          
+          echo "command=$CMD" >> $GITHUB_OUTPUT
+          echo "Command to execute: $CMD"
+      
+      - name: Run vulnerability resolver
+        env:
+          DEVIN_API_KEY: ${{ secrets.DEVIN_API_KEY }}
+        run: |
+          echo "================================================"
+          echo "Processing repository: ${{ matrix.repo }}"
+          echo "================================================"
+          echo ""
+          echo "Executing: ${{ steps.build_cmd.outputs.command }}"
+          echo ""
+          ${{ steps.build_cmd.outputs.command }}
+      
+      - name: Upload batches.json
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: batches-${{ env.REPO_SAFE }}
+          path: batches.json
+          if-no-files-found: warn
+      
+      - name: Upload results.json
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-${{ env.REPO_SAFE }}
+          path: results.json
+          if-no-files-found: warn
+      
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ env.REPO_SAFE }}
+          path: resolver.log
+          if-no-files-found: warn
+      
+      - name: Per-repo summary
+        if: always()
+        run: |
+          echo "## Results for ${{ matrix.repo }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # SARIF source
+          if [ -n "${{ steps.find_sarif.outputs.sarif }}" ]; then
+            echo "**SARIF Source:** Existing file at \`${{ steps.find_sarif.outputs.sarif }}\`" >> $GITHUB_STEP_SUMMARY
+          elif [ -n "${{ steps.pick_sarif_after_codeql.outputs.sarif }}" ]; then
+            echo "**SARIF Source:** Generated via local CodeQL analysis" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Results
+          if [ -f results.json ]; then
+            echo "### Key Metrics" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            
+            VULNS=$(jq -r '.vulnerabilities_found // 0' results.json)
+            BATCHES=$(jq -r '.batches_created // 0' results.json)
+            PROCESSED=$(jq -r '.batches_processed // 0' results.json)
+            SUCCESS=$(jq -r '.successful_batches // 0' results.json)
+            FAILED=$(jq -r '.failed_batches // 0' results.json)
+            STATUS=$(jq -r '.status // "unknown"' results.json)
+            
+            echo "- **Status:** $STATUS" >> $GITHUB_STEP_SUMMARY
+            echo "- **Vulnerabilities Found:** $VULNS" >> $GITHUB_STEP_SUMMARY
+            echo "- **Batches Created:** $BATCHES" >> $GITHUB_STEP_SUMMARY
+            echo "- **Batches Processed:** $PROCESSED" >> $GITHUB_STEP_SUMMARY
+            echo "- **Successful:** $SUCCESS" >> $GITHUB_STEP_SUMMARY
+            echo "- **Failed:** $FAILED" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️ **Processing failed or incomplete** - No results.json generated" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  aggregate:
+    name: Aggregate Results
+    needs: resolve
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+      - name: Checkout security-fix-runner
+        uses: actions/checkout@v4
+      
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: results-*
+          path: artifacts
+      
+      - name: Download batch artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: batches-*
+          path: artifacts
+      
+      - name: Download log artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: logs-*
+          path: artifacts
+      
+      - name: Install jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+      
+      - name: Aggregate results
+        id: aggregate
+        run: |
+          echo "Aggregating results from all repositories..."
+          
+          TOTAL_REPOS=0
+          TOTAL_VULNS=0
+          TOTAL_BATCHES=0
+          TOTAL_PROCESSED=0
+          TOTAL_SUCCESS=0
+          TOTAL_FAILED=0
+          SUCCESS_REPOS=0
+          FAILED_REPOS=0
+          
+          # Create summary data file
+          echo "repo,vulns,batches,processed,success,failed,status" > summary.csv
+          
+          # Process each results file
+          for results_dir in artifacts/results-*; do
+            if [ -d "$results_dir" ] && [ -f "$results_dir/results.json" ]; then
+              TOTAL_REPOS=$((TOTAL_REPOS + 1))
+              
+              REPO_NAME=$(basename "$results_dir" | sed 's/^results-//' | tr '-' '/')
+              VULNS=$(jq -r '.vulnerabilities_found // 0' "$results_dir/results.json")
+              BATCHES=$(jq -r '.batches_created // 0' "$results_dir/results.json")
+              PROCESSED=$(jq -r '.batches_processed // 0' "$results_dir/results.json")
+              SUCCESS=$(jq -r '.successful_batches // 0' "$results_dir/results.json")
+              FAILED=$(jq -r '.failed_batches // 0' "$results_dir/results.json")
+              STATUS=$(jq -r '.status // "unknown"' "$results_dir/results.json")
+              
+              TOTAL_VULNS=$((TOTAL_VULNS + VULNS))
+              TOTAL_BATCHES=$((TOTAL_BATCHES + BATCHES))
+              TOTAL_PROCESSED=$((TOTAL_PROCESSED + PROCESSED))
+              TOTAL_SUCCESS=$((TOTAL_SUCCESS + SUCCESS))
+              TOTAL_FAILED=$((TOTAL_FAILED + FAILED))
+              
+              if [ "$STATUS" = "completed" ] || [ "$STATUS" = "success" ]; then
+                SUCCESS_REPOS=$((SUCCESS_REPOS + 1))
+              else
+                FAILED_REPOS=$((FAILED_REPOS + 1))
+              fi
+              
+              echo "$REPO_NAME,$VULNS,$BATCHES,$PROCESSED,$SUCCESS,$FAILED,$STATUS" >> summary.csv
+            fi
+          done
+          
+          echo "total_repos=$TOTAL_REPOS" >> $GITHUB_OUTPUT
+          echo "total_vulns=$TOTAL_VULNS" >> $GITHUB_OUTPUT
+          echo "total_batches=$TOTAL_BATCHES" >> $GITHUB_OUTPUT
+          echo "total_processed=$TOTAL_PROCESSED" >> $GITHUB_OUTPUT
+          echo "total_success=$TOTAL_SUCCESS" >> $GITHUB_OUTPUT
+          echo "total_failed=$TOTAL_FAILED" >> $GITHUB_OUTPUT
+          echo "success_repos=$SUCCESS_REPOS" >> $GITHUB_OUTPUT
+          echo "failed_repos=$FAILED_REPOS" >> $GITHUB_OUTPUT
+      
+      - name: Create consolidated summary
+        run: |
+          echo "# Enterprise Vulnerability Resolution Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Processed **${{ steps.aggregate.outputs.total_repos }}** repositories in parallel" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "## Per-Repository Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Repository | Vulnerabilities | Batches | Successful | Failed | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|------------|-----------------|---------|------------|--------|--------|" >> $GITHUB_STEP_SUMMARY
+          
+          # Read summary data and create table
+          tail -n +2 summary.csv | while IFS=',' read -r repo vulns batches processed success failed status; do
+            if [ "$status" = "completed" ] || [ "$status" = "success" ]; then
+              STATUS_ICON="✅"
+            elif [ "$failed" -gt 0 ] && [ "$success" -gt 0 ]; then
+              STATUS_ICON="⚠️"
+            else
+              STATUS_ICON="❌"
+            fi
+            
+            echo "| $repo | $vulns | $batches | $success | $failed | $STATUS_ICON $status |" >> $GITHUB_STEP_SUMMARY
+          done
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Aggregate Statistics" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Total Repositories Processed:** ${{ steps.aggregate.outputs.total_repos }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Total Vulnerabilities Found:** ${{ steps.aggregate.outputs.total_vulns }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Total Batches Created:** ${{ steps.aggregate.outputs.total_batches }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Total Batches Processed:** ${{ steps.aggregate.outputs.total_processed }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Total Successful Batches:** ${{ steps.aggregate.outputs.total_success }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Total Failed Batches:** ${{ steps.aggregate.outputs.total_failed }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Repositories Succeeded:** ${{ steps.aggregate.outputs.success_repos }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Repositories Failed:** ${{ steps.aggregate.outputs.failed_repos }}" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ steps.aggregate.outputs.total_processed }}" -gt 0 ]; then
+            SUCCESS_RATE=$((100 * ${{ steps.aggregate.outputs.total_success }} / ${{ steps.aggregate.outputs.total_processed }}))
+            echo "- **Overall Success Rate:** ${SUCCESS_RATE}%" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Artifacts" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Per-repository artifacts are available for download:" >> $GITHUB_STEP_SUMMARY
+          echo "- \`results-{repo}\` - Processing results with PR URLs" >> $GITHUB_STEP_SUMMARY
+          echo "- \`batches-{repo}\` - Vulnerability batch metadata" >> $GITHUB_STEP_SUMMARY
+          echo "- \`logs-{repo}\` - Detailed execution logs" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Next Steps" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "1. Download per-repository artifacts for detailed information" >> $GITHUB_STEP_SUMMARY
+          echo "2. Review Pull Requests created by Devin sessions" >> $GITHUB_STEP_SUMMARY
+          echo "3. Check logs for any errors or warnings" >> $GITHUB_STEP_SUMMARY
+          echo "4. Verify fixes and merge approved PRs" >> $GITHUB_STEP_SUMMARY
