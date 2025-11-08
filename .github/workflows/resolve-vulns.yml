@@ -3,13 +3,9 @@ name: Resolve CodeQL Vulnerabilities (Runner)
 on:
   workflow_dispatch:
     inputs:
-      target_repo:
-        description: 'Single target repository in owner/repo format (e.g., jmansueto/user-management-vulns). Use this OR target_repos.'
-        required: false
-        type: string
-      target_repos:
-        description: 'Multi-line list of target repositories (one per line). For enterprise-scale processing of multiple repos. Use this OR target_repo.'
-        required: false
+      targets:
+        description: 'Target repository or repositories. Single line for one repo (e.g., jmansueto/user-management-vulns) or multi-line for multiple repos (one per line). Lines starting with # are treated as comments.'
+        required: true
         type: string
       target_branch:
         description: 'Branch to target for PRs (optional, defaults to repo default branch). Applied to all repos.'
@@ -53,11 +49,6 @@ on:
         required: false
         default: 'python'
         type: string
-      codeql_queries:
-        description: 'CodeQL query pack to use'
-        required: false
-        default: 'security-extended'
-        type: string
 
 permissions:
   contents: read
@@ -73,18 +64,8 @@ jobs:
       - name: Parse repository inputs
         id: parse_repos
         run: |
-          REPOS=""
-          if [ -n "${{ inputs.target_repos }}" ]; then
-            REPOS="${{ inputs.target_repos }}"
-          elif [ -n "${{ inputs.target_repo }}" ]; then
-            REPOS="${{ inputs.target_repo }}"
-          else
-            echo "Error: Either target_repo or target_repos must be provided"
-            exit 1
-          fi
-          
           # Parse into JSON array, filtering out empty lines and comments
-          REPO_ARRAY=$(echo "$REPOS" | grep -v '^#' | grep -v '^[[:space:]]*$' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          REPO_ARRAY=$(echo "${{ inputs.targets }}" | grep -v '^#' | grep -v '^[[:space:]]*$' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | jq -R -s -c 'split("\n") | map(select(length > 0))')
           
           echo "Repositories to process:"
           echo "$REPO_ARRAY" | jq -r '.[]'
@@ -166,7 +147,7 @@ jobs:
         uses: github/codeql-action/init@v3
         with:
           languages: ${{ inputs.codeql_languages }}
-          queries: ${{ inputs.codeql_queries }}
+          queries: security-extended
           source-root: target
       
       - name: Perform CodeQL analysis (local)

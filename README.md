@@ -85,8 +85,7 @@ Ensure both required secrets (`DEVIN_API_KEY` and `CROSS_REPO_GH_TOKEN`) are con
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `target_repo` | string | No* | - | Single target repository in `owner/repo` format (e.g., `jmansueto/user-management-vulns`). Use this OR `target_repos`. |
-| `target_repos` | string | No* | - | Multi-line list of target repositories (one per line). For enterprise-scale processing of multiple repos. Use this OR `target_repo`. |
+| `targets` | string | Yes | - | Target repository or repositories. Single line for one repo (e.g., `jmansueto/user-management-vulns`) or multi-line for multiple repos (one per line). Lines starting with `#` are treated as comments. |
 | `target_branch` | string | No | - | Branch to target for PRs (optional, defaults to repo's default branch). Applied to all repos. |
 | `sarif_path` | string | No | - | Relative path to SARIF file in target repo (optional, e.g., `codeql-results/results-123.sarif`). Applied to all repos. |
 | `batch_size` | string | No | `4` | Number of vulnerabilities per batch |
@@ -96,9 +95,8 @@ Ensure both required secrets (`DEVIN_API_KEY` and `CROSS_REPO_GH_TOKEN`) are con
 | `session_timeout` | string | No | `1800` | Maximum seconds to wait for each Devin session (default: 1800 = 30 minutes) |
 | `poll_interval` | string | No | `30` | Seconds between status polls when waiting for Devin sessions |
 | `codeql_languages` | string | No | `python` | Languages for CodeQL analysis (comma-separated if multiple) |
-| `codeql_queries` | string | No | `security-extended` | CodeQL query pack to use |
 
-\* Either `target_repo` or `target_repos` must be provided
+**Note**: The CodeQL query pack is hardcoded to `security-extended` for consistency across all runs.
 
 ## Example Runs
 
@@ -107,7 +105,7 @@ Ensure both required secrets (`DEVIN_API_KEY` and `CROSS_REPO_GH_TOKEN`) are con
 Test the workflow without making actual API calls:
 
 ```yaml
-target_repo: jmansueto/user-management-vulns
+targets: jmansueto/user-management-vulns
 dry_run: true
 batch_size: 4
 max_batches: 2
@@ -120,7 +118,7 @@ This will parse the SARIF, create batches, and show what would be processed, but
 Process a single repository and create actual PRs:
 
 ```yaml
-target_repo: jmansueto/user-management-vulns
+targets: jmansueto/user-management-vulns
 target_branch: main
 dry_run: false
 batch_size: 4
@@ -134,7 +132,7 @@ This will create actual Devin sessions and PRs for the specified repository.
 Test enterprise-scale processing with multiple repositories:
 
 ```yaml
-target_repos: |
+targets: |
   jmansueto/user-management-vulns
   jmansueto/security-fix-runner
   orgname/service-api
@@ -151,7 +149,7 @@ This demonstrates enterprise-scale processing: 3 repositories processed in paral
 Process multiple repositories in production mode:
 
 ```yaml
-target_repos: |
+targets: |
   jmansueto/user-management-vulns
   jmansueto/another-repo
   # orgname/disabled-repo (commented out)
@@ -169,7 +167,7 @@ This processes multiple repositories in production mode, creating actual PRs. Li
 Use a specific SARIF file from a custom location:
 
 ```yaml
-target_repo: jmansueto/user-management-vulns
+targets: jmansueto/user-management-vulns
 sarif_path: custom-results/analysis-results.sarif
 dry_run: false
 batch_size: 4
@@ -281,7 +279,7 @@ The aggregate job creates an enterprise-wide summary showing:
 1. Verify the `codeql_languages` input matches the repository's languages
 2. Check that the repository contains code in the specified language
 3. Review the workflow logs for specific CodeQL error messages
-4. Try specifying a different `codeql_queries` pack (e.g., `security-and-quality`)
+4. The workflow uses the `security-extended` query pack by default, which should work for most repositories
 
 ### Workflow fails on some repos but not others
 
