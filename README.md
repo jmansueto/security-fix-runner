@@ -8,7 +8,7 @@ Security Fix Runner is a standalone GitHub Actions workflow that can target any 
 
 ### Key Features
 
-- **Enterprise-Scale Processing**: Process multiple repositories in parallel using GitHub Actions matrix strategy
+- **Scalable Processing**: Process multiple repositories in parallel using GitHub Actions matrix strategy
 - **Automatic SARIF Detection**: Finds existing CodeQL SARIF files or generates them on-demand
 - **Intelligent Batching**: Groups related vulnerabilities by file, rule, or directory for efficient fixes
 - **Controlled Concurrency**: Configure parallel processing limits to manage resource usage
@@ -175,63 +175,6 @@ batch_size: 4
 
 This will use the SARIF file at the specified path instead of auto-detecting.
 
-## Vulnerability Batching Strategy
-
-The runner uses a three-tier hierarchical batching strategy implemented in `vulnerability-resolver/parse_sarif.py`:
-
-### Bucket A: Same File + Same Rule
-Groups vulnerabilities that occur in the same file AND are triggered by the same CodeQL rule. This creates highly focused batches where all issues are related and can often be fixed with a single pattern.
-
-**Example**: Multiple SQL injection vulnerabilities (same rule) in `models.py` (same file)
-
-### Bucket B: Same Rule Across Files
-Groups remaining vulnerabilities by the same CodeQL rule across different files. This handles cases where the same type of vulnerability appears in multiple locations.
-
-**Example**: XSS vulnerabilities (same rule) in `routes/users.py`, `routes/profile.py`, and `routes/admin.py` (different files)
-
-### Bucket C: Same Directory
-Groups all remaining vulnerabilities by directory. This is a catch-all to ensure complete coverage while maintaining some logical grouping.
-
-**Example**: Various different vulnerabilities in the `routes/` directory
-
-Each batch is limited to the configured `batch_size` (default: 4 vulnerabilities), ensuring manageable PR scope.
-
-## Architecture Notes
-
-### Enterprise-Scale Design
-
-The workflow uses GitHub Actions matrix strategy to process multiple repositories in parallel, demonstrating enterprise capability:
-
-- **Three-Job Architecture**: Separate jobs for preparation, resolution, and aggregation
-- **Matrix Strategy**: Dynamic matrix generation from repository list enables parallel processing
-- **Controlled Concurrency**: `max_parallel` input limits simultaneous processing to manage resource usage
-- **Fail-Safe Processing**: `fail-fast: false` ensures one repo's failure doesn't stop others
-
-### Per-Repository Artifacts
-
-Each repository gets separate artifacts with sanitized names for clear tracking:
-
-- `results-{owner-repo}` - Processing results with status, PR URLs, and metrics
-- `batches-{owner-repo}` - Vulnerability batch metadata with grouping details
-- `logs-{owner-repo}` - Detailed execution logs for debugging
-
-### Consolidated Reporting
-
-The aggregate job creates an enterprise-wide summary showing:
-
-- Per-repository table with vulnerabilities, batches, success/failure counts, and status
-- Aggregate totals across all repositories
-- Overall success rate
-- Links to download per-repository artifacts
-
-### Technical Details
-
-- The runner uses the existing `vulnerability-resolver/` Python code without modifications
-- SARIF files are detected automatically or generated via local CodeQL runs
-- The runner never commits SARIF files back to target repositories
-- All results are provided as downloadable artifacts
-- CodeQL runs locally in the runner's environment with `source-root: target` to scan checked-out repos
-- `upload: false` prevents the runner from trying to upload security events to target repos
 
 ## Troubleshooting
 
@@ -302,17 +245,3 @@ Optional features that could be added in future versions:
 - **SARIF Source Flexibility**: Support for other SARIF sources beyond CodeQL (e.g., Semgrep, Snyk)
 - **PR Review Automation**: Automatic approval of PRs that pass all checks
 - **Slack/Email Notifications**: Real-time notifications of processing status and results
-
-## Contributing
-
-This is a centralized runner designed to work with any repository. To use it with your repositories:
-
-1. Ensure the required secrets are configured in this repository
-2. Run the workflow via manual dispatch with your target repository
-3. Monitor the results and review the generated PRs
-
-For issues or feature requests, please contact the repository maintainer.
-
-## License
-
-This project is provided as-is for automated vulnerability remediation purposes.
