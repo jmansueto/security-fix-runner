@@ -240,44 +240,6 @@ jobs:
           name: logs-${{ env.REPO_SAFE }}
           path: resolver.log
           if-no-files-found: warn
-      
-      - name: Per-repo summary
-        if: always()
-        run: |
-          echo "## Results for ${{ matrix.repo }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          # SARIF source
-          if [ -n "${{ steps.find_sarif.outputs.sarif }}" ]; then
-            echo "**SARIF Source:** Existing file at \`${{ steps.find_sarif.outputs.sarif }}\`" >> $GITHUB_STEP_SUMMARY
-          elif [ -n "${{ steps.pick_sarif_after_codeql.outputs.sarif }}" ]; then
-            echo "**SARIF Source:** Generated via local CodeQL analysis" >> $GITHUB_STEP_SUMMARY
-          fi
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          # Results
-          if [ -f results.json ]; then
-            echo "### Key Metrics" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            
-            VULNS=$(jq -r '.vulnerabilities_found // 0' results.json)
-            BATCHES=$(jq -r '.batches_created // 0' results.json)
-            PROCESSED=$(jq -r '.batches_processed // 0' results.json)
-            SUCCESS=$(jq -r '.successful_batches // 0' results.json)
-            FAILED=$(jq -r '.failed_batches // 0' results.json)
-            STATUS=$(jq -r '.status // "unknown"' results.json)
-            
-            echo "- **Status:** $STATUS" >> $GITHUB_STEP_SUMMARY
-            echo "- **Vulnerabilities Found:** $VULNS" >> $GITHUB_STEP_SUMMARY
-            echo "- **Batches Created:** $BATCHES" >> $GITHUB_STEP_SUMMARY
-            echo "- **Batches Processed:** $PROCESSED" >> $GITHUB_STEP_SUMMARY
-            echo "- **Successful:** $SUCCESS" >> $GITHUB_STEP_SUMMARY
-            echo "- **Failed:** $FAILED" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "⚠️ **Processing failed or incomplete** - No results.json generated" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-          fi
 
   aggregate:
     name: Aggregate Results
@@ -369,7 +331,7 @@ jobs:
       
       - name: Create consolidated summary
         run: |
-          echo "# Enterprise Vulnerability Resolution Summary" >> $GITHUB_STEP_SUMMARY
+          echo "# Vulnerability Resolution Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Processed **${{ steps.aggregate.outputs.total_repos }}** repositories in parallel" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
