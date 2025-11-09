@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       targets:
-        description: 'Target repository or repositories. Single line for one repo (e.g., jmansueto/user-management-vulns) or multi-line for multiple repos (one per line). Lines starting with # are treated as comments.'
+        description: 'Target repository or repositories (comma-separated). Examples: "user/repo1" or "user/repo1, user/repo2"'
         required: true
         type: string
       target_branch:
@@ -64,8 +64,8 @@ jobs:
       - name: Parse repository inputs
         id: parse_repos
         run: |
-          # Parse into JSON array, filtering out empty lines and comments
-          REPO_ARRAY=$(echo "${{ inputs.targets }}" | grep -v '^#' | grep -v '^[[:space:]]*$' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          # Parse into JSON array, splitting on commas and trimming whitespace
+          REPO_ARRAY=$(echo "${{ inputs.targets }}" | jq -R -s -c 'split(",") | map(gsub("^[[:space:]]+|[[:space:]]+$";"")) | map(select(length > 0))')
           
           echo "Repositories to process:"
           echo "$REPO_ARRAY" | jq -r '.[]'
